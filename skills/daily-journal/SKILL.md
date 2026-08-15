@@ -1,6 +1,6 @@
 ---
 name: daily-journal
-description: 日结生成助手。自动收集当天 CatDesk 会话记录、Git 提交、记忆系统增量和工作区文件变更，生成结构化日结报告。当用户说"写日结"、"生成日结"、"今天总结"、"daily journal"、"日结"、"帮我做个日结"、"总结今天"时触发。也可由自动化任务每天定时触发。
+description: 日结生成助手。自动收集当天 Codex 会话记录、Git 提交、记忆系统增量和工作区文件变更，生成结构化日结报告。当用户说"写日结"、"生成日结"、"今天总结"、"daily journal"、"日结"、"帮我做个日结"、"总结今天"时触发。也可由自动化任务每天定时触发。
 ---
 
 # 日结生成助手
@@ -16,31 +16,58 @@ description: 日结生成助手。自动收集当天 CatDesk 会话记录、Git 
 先探测当前环境有哪些数据源可用，决定后续路径：
 
 ```bash
-command -v catdesk && echo "catdesk: 可用" || echo "catdesk: 不可用"
+command -v codex && echo "codex: 可用" || echo "codex: 不可用"
+ls -d ~/.codex/sessions 2>/dev/null && echo "codex 会话目录: 存在" || echo "codex 会话目录: 不存在"
+command -v git && echo "git: 可用" || echo "git: 不可用"
 ```
 
-- CatDesk 可用：走第一步（会话记录）+ 第二步（Git 提交，作为交叉印证）
-- CatDesk 不可用：跳过第一步，以第二步（Git 提交）+ 第四步（文件变更）作为主要数据源
+- Codex 及会话目录可用：走第一步（会话记录）+ 第二步（Git 提交，作为交叉印证）
+- Codex 或会话目录不可用：跳过第一步，以第二步（Git 提交）+ 第四步（文件变更）作为主要数据源
 
 报告开头必须注明本次实际使用了哪些数据源。
 
-### 第一步：获取今天的会话列表（CatDesk，如可用）
+### 第一步：获取今天的 Codex 会话记录
 
-运行以下命令获取所有会话：
+Codex CLI 的会话记录保存在 `~/.codex/sessions/` 目录下，按日期分目录（格式 `YYYY-MM-DD`），每个会话是一个 JSONL 文件。
 
-```bash
-catdesk session list
-```
-
-从返回的 JSON 数组中，筛选出 `timestamp` 对应今天的会话（今天 00:00 到当前时间）。记录每个会话的 `title`、`projectPath`、`status`、`timestamp`。
-
-对每个今天的会话，运行以下命令获取对话日志摘要（取最后 100 行即可了解会话结尾状态）：
+列出今天的会话文件：
 
 ```bash
-catdesk log conversation --id <conversationId> -n 100
+ls -la ~/.codex/sessions/$(date +%Y-%m-%d)/
 ```
 
-从日志中提取：会话做了什么、产出了什么文件、做了什么决策。
+对每个今天的会话文件，先查看其结构（确认字段名，不同版本可能有差异）：
+
+```bash
+head -5 ~/.codex/sessions/<today>/<session-id>.jsonl
+```
+
+然后提取用户消息与助手回复（含工具调用、软件包执行和 bash 输出，能还原实际动作）：
+
+```bash
+jq -r 'select(.role=="user" or .role=="assistant") | "[\(.role)] \(.content)"' ~/.codex/sessions/<today>/<session-id>.jsonl
+```
+
+如果 `jq` 不可用，使用：
+
+```bash
+python3 -c "
+import json,sys
+seen=0
+for line in open(sys.argv[1]):
+    try:
+        m=json.loads(line)
+    except: continue
+    role=m.get('role')
+    if role in ('user','assistant') and m.get('content'):
+        c=m['content']
+        if isinstance(c,list):
+            c=' '.join(str(x.get('text',x.get('content',''))) for x in c if isinstance(x,dict))
+        print(f'[{role}] {c}')
+" ~/.codex/sessions/<today>/<session-id>.jsonl
+```
+
+从会话记录中提取：每个会话做了什么、产出了什么文件、做了什么决策。注意区分「用户目标」与「最终结果」，工具调用和命令输出能印证是否真的完成。
 
 ### 第二步：Git 提交分析（通用数据源，必须执行）
 
@@ -57,7 +84,7 @@ git -C <workspace> status --short
 git -C <workspace> diff --stat
 ```
 
-从提交信息提取：今天完成了什么、提交了哪些文件、推进了哪些模块。Git 提交是日结最可靠的客观数据源——即使会话日志缺失，也能还原当天的工作轨迹。
+从提交信息提取：今天完成了什么、提交了哪些文件、推进了哪些模块。Git 提交是日结最可靠的客观数据源——即使会话记录缺失，也能还原当天的工作轨迹。
 
 ### 第三步：搜索记忆系统增量
 
@@ -157,9 +184,9 @@ find <workspace> -type f -newermt "$(date +%Y-%m-%d)" -not -path '*/.git/*' -not
 
 | 步骤 | 数据源 | 可用工具 |
 | ---- | ---- | ---- |
-| 数据源探测 | `command -v catdesk` | `bash` |
-| 会话列表 | `catdesk session list` | `bash` |
-| 对话日志 | `catdesk log conversation` | `bash` |
+| 数据源探测 | `command -v codex` / `~/.codex/sessions` | `bash` |
+| 会话列表 | `ls ~/.codex/sessions/<today>/` | `bash` |
+| 对话内容 | 解析 JSONL 会话文件 | `bash` / `jq` / `python3` |
 | Git 提交 | `git log` / `git status` / `git diff` | `bash` |
 | 记忆检索 | 记忆搜索 | `memory_search`（如可用） |
 | 文件变更 | `find` / `Get-ChildItem` | `bash` / `glob` |
@@ -168,8 +195,9 @@ find <workspace> -type f -newermt "$(date +%Y-%m-%d)" -not -path '*/.git/*' -not
 ## 注意事项
 
 - 第零步探测后，按可用数据源走对应路径；报告开头注明本次使用了哪些数据源
-- 如果 `catdesk` 不可用，以 Git 提交 + 文件变更作为主要数据源
+- 如果 Codex 或 `~/.codex/sessions` 不可用，以 Git 提交 + 文件变更作为主要数据源
+- Codex 会话 JSONL 的字段名可能随版本变化——先 `head -5` 看结构再解析，不要假设字段固定
 - 如果 `memory_search` / `memory_write` 工具不可用，跳过记忆相关步骤并在报告中注明
-- Git 提交是客观数据，会话日志是语义数据——两者能交叉印证时，日结质量最高
-- 各步骤尽量并行执行以提高效率（会话列表查询、Git 分析和记忆搜索可以同时进行）
+- Git 提交是客观数据，会话记录是语义数据——两者能交叉印证时，日结质量最高
+- 各步骤尽量并行执行以提高效率（会话记录扫描、Git 分析和记忆搜索可以同时进行）
 - 日结报告应聚焦于"增量"和"决策"，避免流水账
